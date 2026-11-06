@@ -9,6 +9,7 @@ from torch.utils.data import DataLoader
 import numpy as np
 import sys, time, os
 
+import regex as re
 ###
 ### Part 1. Tokenization.
 ###
@@ -41,6 +42,9 @@ import sys, time, os
 # This simple version treats a whole non-empty line as one sequence. Therefore,
 # it may learn tokens that contain spaces or parts of more than one word.
 
+
+test_text = "low low low low low lower lower widest widest widest newest newest newest newest newest newest"
+
 def split_into_bytes(text):
     """Split a string into individual UTF-8 byte tokens.
 
@@ -50,7 +54,12 @@ def split_into_bytes(text):
     Returns:
         A list containing one ``bytes`` object for each byte in the text.
     """
-    ...
+    encoded_text = text.encode("utf-8")
+    # bytes_list = [encoded_text[i: i+1] for i in range(len(encoded_text))]
+    bytes_list = [bytes([b]) for b in encoded_text]
+    
+    return bytes_list
+    
 
 def build_tokenizer(train_file, max_voc_size=None, model_max_length=None,
                     pad_token='<PAD>', unk_token='<UNK>', bos_token='<BOS>', eos_token='<EOS>'):
@@ -66,17 +75,68 @@ def build_tokenizer(train_file, max_voc_size=None, model_max_length=None,
              eos_token:         The dummy string corresponding to the end the text.
     """
 
+    if max_voc_size < 260:
+        raise ValueError("max_voc_size must be at least 260 (4 special + 256 bytes)")
     # TODO: build the vocabulary, using a byte-level BPE tokenization (explained above)
     # Then return a tokenizer object (implemented below).
-    ...
+    # load the file
+    # f = open(train_file).read()
+    vocabulary = {bos_token: 0, eos_token: 1, unk_token: 2, pad_token: 3}
+    for i in range(256):
+        vocabulary.update({bytes([i]): i+4})
+    # # splited_file_bytes = split_into_bytes(f)
+    with open(train_file, encoding="utf-8") as f:
+        frequencies = Counter()
+        for line in f:
+            line = line.strip()
+            if line:
+                frequencies[tuple(split_into_bytes(line))] += 1
+
+    voc_size = len(vocabulary)
+    merges = []
+    while voc_size < max_voc_size:
+        pairs = Counter()
+        for chars, counts in frequencies.items():
+            for i in range(len(chars) - 1):
+                pairs[(chars[i], chars[i+1])] += counts
+        if not pairs:
+            break
+        merged = max(pairs, key=lambda p: (pairs[p], p))
+        merges.append(merged)
+        new_frequencies = Counter()
+        for chars, counts in frequencies.items():
+            new_chars = []
+            i = 0
+            while i < len(chars):
+                if i + 1 < len(chars) and (chars[i], chars[i+1]) == merged:
+                    new_chars.append(merged[0] + merged[1])
+                    i += 2
+                else:
+                    new_chars.append(chars[i])
+                    i += 1
+            new_frequencies[tuple(new_chars)] += counts
+        frequencies = new_frequencies
+        vocabulary[merged[0] + merged[1]] = voc_size
+        voc_size += 1
+
+    return A1Tokenizer(vocabulary, merges, 
+    vocabulary[pad_token], vocabulary[unk_token], vocabulary[bos_token], vocabulary[eos_token],
+    model_max_length=model_max_length
+    )
 
 class A1Tokenizer:
     """A minimal implementation of a tokenizer similar to tokenizers in the HuggingFace library."""
 
-    def __init__(self, SOMETHING):
+    def __init__(self, vocabulary, merges, pad_token_id, unk_token_id, bos_token_id, eos_token_id, model_max_length):
         # TODO: store all values you need in order to implement __call__ below.
-        self.pad_token_id = ...     # Compulsory attribute.
-        self.model_max_length = ... # Needed for truncation.
+        self.str_to_int = vocabulary
+        self.int_to_str = {i: t for t, i in vocabulary.items()}
+        self.merges = merges
+        self.pad_token_id = pad_token_id     # Compulsory attribute.
+        self.unk_token_id = unk_token_id
+        self.bos_token_id = bos_token_id
+        self.eos_token_id = eos_token_id
+        self.model_max_length = model_max_length # Needed for truncation.
 
     def __call__(self, texts, truncation=False, padding=False, return_tensors=None):
         """Tokenize the given texts and return a BatchEncoding containing the integer-encoded tokens.
@@ -107,15 +167,54 @@ class A1Tokenizer:
         # Optionally, if you want to be 100% HuggingFace-compatible, you should also include an 
         # attention mask of the same shape as input_ids. In this mask, padding tokens correspond
         # to the the value 0 and real tokens to the value 1.
-        return BatchEncoding({'input_ids': ...})
+
+        ids_ = []
+        for text in texts:
+            ids = []
+            tokens = split_into_bytes(text.strip())
+            for pair in self.merges:
+                new_tokens = []
+                i = 0
+                while i < len(tokens):
+                    if i + 1 < len(tokens) and (tokens[i], tokens[i+1]) == pair:
+                        new_tokens.append(pair[0] + pair[1])
+                        i += 2
+                    else:
+                        new_tokens.append(tokens[i])
+                        i += 1
+                tokens = new_tokens
+            for token in tokens:
+                ids.append(self.str_to_int.get(token, self.unk_token_id))
+
+            if truncation and self.model_max_length is not None:
+                ids = ids[:self.model_max_length]
+
+            ids_.append([self.bos_token_id] + ids + [self.eos_token_id])
+
+        if padding:
+            max_len = max(len(x) for x in ids_)
+            mask = [[1]*len(x) + [0]*(max_len-len(x)) for x in ids_]
+            ids_ = [x + [self.pad_token_id]*(max_len-len(x)) for x in ids_]
+        else:
+            mask = [[1]*len(x) for x in ids_]
+
+        if return_tensors == 'pt':
+            ids_, mask = torch.tensor(ids_), torch.tensor(mask)
+        return BatchEncoding({'input_ids': ids_, 'attention_mask': mask})
+
 
     def __len__(self):
         """Return the size of the vocabulary."""
-        return ...
+        return len(self.str_to_int)
 
     def decode(self, ids):
         """Return a string decoded from given input ids"""
-        return ... 
+        byte_tokens = []
+        for i in ids:
+            tok = self.int_to_str[int(i)]
+            if isinstance(tok, bytes):
+                byte_tokens.append(tok)
+        return b''.join(byte_tokens).decode('utf-8', errors='replace')
     
     def save(self, filename):
         """Save the tokenizer to the given file."""
