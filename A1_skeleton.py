@@ -42,9 +42,6 @@ import regex as re
 # This simple version treats a whole non-empty line as one sequence. Therefore,
 # it may learn tokens that contain spaces or parts of more than one word.
 
-
-test_text = "low low low low low lower lower widest widest widest newest newest newest newest newest newest"
-
 def split_into_bytes(text):
     """Split a string into individual UTF-8 byte tokens.
 
@@ -75,68 +72,121 @@ def build_tokenizer(train_file, max_voc_size=None, model_max_length=None,
              eos_token:         The dummy string corresponding to the end the text.
     """
 
-    if max_voc_size < 260:
+    if max_voc_size is None or max_voc_size < 260:
         raise ValueError("max_voc_size must be at least 260 (4 special + 256 bytes)")
     # TODO: build the vocabulary, using a byte-level BPE tokenization (explained above)
     # Then return a tokenizer object (implemented below).
-    # load the file
-    # f = open(train_file).read()
-    vocabulary = {bos_token: 0, eos_token: 1, unk_token: 2, pad_token: 3}
+
+    vocab = {bos_token: 0, eos_token: 1, unk_token: 2, pad_token: 3}
     for i in range(256):
-        vocabulary.update({bytes([i]): i+4})
-    # # splited_file_bytes = split_into_bytes(f)
+        vocab.update({bytes([i]): i+4})
+
     with open(train_file, encoding="utf-8") as f:
-        frequencies = Counter()
+        frequency_table = Counter()
         for line in f:
             line = line.strip()
             if line:
-                frequencies[tuple(split_into_bytes(line))] += 1
+                frequency_table[tuple(split_into_bytes(line))] += 1
 
-    voc_size = len(vocabulary)
+    pair_frequencies = Counter()
+    for chars, counts in frequency_table.items():
+        for i in range(len(chars) - 1):
+            pair_frequencies[(chars[i], chars[i+1])] += counts
+
+    token_to_lines = {}
+    for token_tuple in frequency_table:
+        for token in set(token_tuple):
+            if token not in token_to_lines:
+                token_to_lines[token] = set()
+            token_to_lines[token].add(token_tuple)
     merges = []
-    while voc_size < max_voc_size:
-        pairs = Counter()
-        for chars, counts in frequencies.items():
-            for i in range(len(chars) - 1):
-                pairs[(chars[i], chars[i+1])] += counts
-        if not pairs:
-            break
-        merged = max(pairs, key=lambda p: (pairs[p], p))
-        merges.append(merged)
-        new_frequencies = Counter()
-        for chars, counts in frequencies.items():
-            new_chars = []
+    while len(vocab) < max_voc_size and pair_frequencies:
+        best_pair = max(pair_frequencies.items(), key=lambda x: (x[1], x[0]))[0]
+        a, b = best_pair
+        merged_token = a + b
+        merges.append(best_pair)
+        # Different merge paths can produce the same bytes; keep the existing id then.
+        if merged_token not in vocab:
+            vocab[merged_token] = len(vocab)
+
+        # Only lines containing both tokens can change.
+        lines_to_update = token_to_lines.get(a, set()) & token_to_lines.get(b, set())
+        touched_pairs = set()
+        for old in lines_to_update:
+            new = []
             i = 0
-            while i < len(chars):
-                if i + 1 < len(chars) and (chars[i], chars[i+1]) == merged:
-                    new_chars.append(merged[0] + merged[1])
+            while i < len(old):
+                if i + 1 < len(old) and old[i] == a and old[i + 1] == b:
+                    new.append(merged_token)
                     i += 2
                 else:
-                    new_chars.append(chars[i])
+                    new.append(old[i])
                     i += 1
-            new_frequencies[tuple(new_chars)] += counts
-        frequencies = new_frequencies
-        vocabulary[merged[0] + merged[1]] = voc_size
-        voc_size += 1
+            new = tuple(new)
+            if new == old:  # both tokens present, but never adjacent
+                continue
 
-    return A1Tokenizer(vocabulary, merges, 
-    vocabulary[pad_token], vocabulary[unk_token], vocabulary[bos_token], vocabulary[eos_token],
+            # Replace the line's old pair counts by its new ones.
+            freq = frequency_table.pop(old)
+            for i in range(len(old) - 1):
+                pair = (old[i], old[i + 1])
+                pair_frequencies[pair] -= freq
+                touched_pairs.add(pair)
+            for i in range(len(new) - 1):
+                pair = (new[i], new[i + 1])
+                pair_frequencies[pair] += freq
+                touched_pairs.add(pair)
+            frequency_table[new] += freq
+
+            for token in set(old):
+                token_to_lines[token].discard(old)
+                if not token_to_lines[token]:
+                    del token_to_lines[token]
+            for token in set(new):
+                token_to_lines.setdefault(token, set()).add(new)
+
+        for pair in touched_pairs:
+            if pair_frequencies[pair] <= 0:
+                pair_frequencies.pop(pair, None)
+
+    return A1Tokenizer(vocab, merges, 
+    vocab[pad_token], vocab[unk_token], vocab[bos_token], vocab[eos_token],
     model_max_length=model_max_length
     )
 
 class A1Tokenizer:
     """A minimal implementation of a tokenizer similar to tokenizers in the HuggingFace library."""
 
-    def __init__(self, vocabulary, merges, pad_token_id, unk_token_id, bos_token_id, eos_token_id, model_max_length):
+    def __init__(self, vocab, merges, pad_token_id, unk_token_id, bos_token_id, eos_token_id, model_max_length):
         # TODO: store all values you need in order to implement __call__ below.
-        self.str_to_int = vocabulary
-        self.int_to_str = {i: t for t, i in vocabulary.items()}
+        self.str_to_int = vocab
+        self.int_to_str = {i: t for t, i in vocab.items()}
         self.merges = merges
+        self.merge_ranks = {pair: rank for rank, pair in enumerate(merges)}
         self.pad_token_id = pad_token_id     # Compulsory attribute.
         self.unk_token_id = unk_token_id
         self.bos_token_id = bos_token_id
         self.eos_token_id = eos_token_id
         self.model_max_length = model_max_length # Needed for truncation.
+
+    def _apply_merges(self, tokens):
+        ranks = self.merge_ranks
+        while len(tokens) > 1:
+            best = min(zip(tokens, tokens[1:]), key=lambda p: ranks.get(p, len(ranks)))
+            if best not in ranks:
+                break
+            a, b = best
+            new_tokens = []
+            i = 0
+            while i < len(tokens):
+                if i + 1 < len(tokens) and tokens[i] == a and tokens[i + 1] == b:
+                    new_tokens.append(a + b)
+                    i += 2
+                else:
+                    new_tokens.append(tokens[i])
+                    i += 1
+            tokens = new_tokens
+        return tokens
 
     def __call__(self, texts, truncation=False, padding=False, return_tensors=None):
         """Tokenize the given texts and return a BatchEncoding containing the integer-encoded tokens.
@@ -171,18 +221,7 @@ class A1Tokenizer:
         ids_ = []
         for text in texts:
             ids = []
-            tokens = split_into_bytes(text.strip())
-            for pair in self.merges:
-                new_tokens = []
-                i = 0
-                while i < len(tokens):
-                    if i + 1 < len(tokens) and (tokens[i], tokens[i+1]) == pair:
-                        new_tokens.append(pair[0] + pair[1])
-                        i += 2
-                    else:
-                        new_tokens.append(tokens[i])
-                        i += 1
-                tokens = new_tokens
+            tokens = self._apply_merges(split_into_bytes(text.strip()))
             for token in tokens:
                 ids.append(self.str_to_int.get(token, self.unk_token_id))
 
@@ -202,6 +241,10 @@ class A1Tokenizer:
             ids_, mask = torch.tensor(ids_), torch.tensor(mask)
         return BatchEncoding({'input_ids': ids_, 'attention_mask': mask})
 
+
+    @property
+    def vocab_size(self):
+        return len(self.str_to_int)
 
     def __len__(self):
         """Return the size of the vocabulary."""
@@ -246,9 +289,9 @@ class A1RNNModel(PreTrainedModel):
     
     def __init__(self, config):
         super().__init__(config)
-        self.embedding = ...
-        self.rnn = ...
-        self.unembedding = ...
+        self.embedding = nn.Embedding(config.vocab_size, config.embedding_size)
+        self.rnn = nn.GRU(config.embedding_size, config.hidden_size, batch_first=True)
+        self.unembedding = nn.Linear(config.hidden_size, config.vocab_size)
         self.post_init() # for compatibility 
         
     def forward(self, labels):
@@ -262,17 +305,17 @@ class A1RNNModel(PreTrainedModel):
 
         loss_func = torch.nn.CrossEntropyLoss(ignore_index=-100)
 
-        X = ... # all columns in input_ids except the last one
-        Y = ... # all columns in input_ids except the first one
+        X = labels[:, :-1].clamp(min=0) # all columns in input_ids except the last one
+        Y = labels[:, 1:] # all columns in input_ids except the first one
 
         assert(X.shape == Y.shape)
 
-        embedded = ...
-        rnn_out, _ = ...
-        out = ...
+        embedded = self.embedding(X)
+        rnn_out, _ = self.rnn(embedded)
+        out = self.unembedding(rnn_out)
 
         #  compute the loss for the model output and Y 
-        return CausalLMOutputWithPast(...)
+        return CausalLMOutputWithPast(loss=loss_func(out.reshape(-1, out.size(-1)), Y.reshape(-1)), logits=out)
 
 
 ###
@@ -294,6 +337,20 @@ class A1RNNModel(PreTrainedModel):
 # - per_device_eval_batch_size:
 #                     The batch size to use while evaluating.
 # - output_dir:       The directory where the trained model will be saved.
+
+class TrainingArguments(object):
+
+    def __init__(self, optim='adamw_torch', eval_strategy='epoch', use_cpu=False, learning_rate=5e-5,
+                 num_train_epochs=3, per_device_train_batch_size=8, per_device_eval_batch_size=8,
+                 output_dir='./results'):
+        self.optim = optim
+        self.eval_strategy = eval_strategy
+        self.use_cpu = use_cpu
+        self.learning_rate = learning_rate
+        self.num_train_epochs = num_train_epochs
+        self.per_device_train_batch_size = per_device_train_batch_size
+        self.per_device_eval_batch_size = per_device_eval_batch_size
+        self.output_dir = output_dir
 
 class A1Trainer:
     """A minimal implementation similar to a Trainer from the HuggingFace library."""
@@ -339,11 +396,20 @@ class A1Trainer:
         
         # TODO: Relevant arguments: at least args.learning_rate, but you can optionally also consider
         # other Adam-related hyperparameters here.
-        optimizer = torch.optim.AdamW(...)
+        optimizer = torch.optim.AdamW(self.model.parameters(), lr=args.learning_rate)
 
         # TODO: Relevant arguments: args.per_device_train_batch_size, args.per_device_eval_batch_size
-        train_loader = DataLoader(...)
-        val_loader = DataLoader(...)
+        pad_id = self.processing_class.pad_token_id
+        if pad_id is None: # e.g. the GPT-2 tokenizer has no pad token
+            pad_id = self.processing_class.eos_token_id
+
+        def collate(items):
+            seqs = [x['input_ids'] if isinstance(x, dict) else x for x in items]
+            n = max(len(q) for q in seqs)
+            return torch.tensor([list(q) + [pad_id] * (n - len(q)) for q in seqs])
+
+        train_loader = DataLoader(self.train_dataset, batch_size=args.per_device_train_batch_size, shuffle=True, collate_fn=collate)
+        val_loader = DataLoader(self.eval_dataset, batch_size=args.per_device_eval_batch_size, shuffle=False, collate_fn=collate)
         
         # TODO: Your work here is to implement the training loop.
         #       
@@ -361,7 +427,86 @@ class A1Trainer:
         #       loss.backward() # loss is stored as an attribute of model's output
         #       optimizer.step()
 
+        for epoch in range(args.num_train_epochs):
+            self.model.train()
+            for batch in train_loader:
+                labels = batch.to(device)
+                labels[labels == pad_id] = -100
+                outputs = self.model(labels)
+                loss = outputs.loss
+
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+
+            # Evaluate on validation set
+            self.model.eval()
+            val_loss = 0.0
+            with torch.no_grad():
+                for batch in val_loader:
+                    labels = batch.to(device)
+                    labels[labels == pad_id] = -100
+                    outputs = self.model(labels)
+                    val_loss += outputs.loss.item()
+
+            avg_val_loss = val_loss / len(val_loader)
+            print(f'Epoch {epoch + 1}/{args.num_train_epochs}, Validation Loss: {avg_val_loss:.4f}')
+
         print(f'Saving to {args.output_dir}.')
         self.model.save_pretrained(args.output_dir)
 
+
+def perplexity(model, dataset, processing_class, batch_size=8):
+    """Compute the perplexity of the model on the given dataset."""
+    device = model.device
+    pad_id = processing_class.pad_token_id
+    if pad_id is None: # e.g. the GPT-2 tokenizer has no pad token
+        pad_id = processing_class.eos_token_id
+
+    def collate(items):
+        seqs = [x['input_ids'] if isinstance(x, dict) else x for x in items]
+        n = max(len(q) for q in seqs)
+        return torch.tensor([list(q) + [pad_id] * (n - len(q)) for q in seqs])
+
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, collate_fn=collate)
+
+    model.eval()
+    total_loss = 0.0
+    total_tokens = 0
+    with torch.no_grad():
+        for batch in loader:
+            labels = batch.to(device)
+            labels[labels == pad_id] = -100
+            outputs = model(labels)
+            loss = outputs.loss.item()
+            total_loss += loss * (labels != -100).sum().item()
+            total_tokens += (labels != -100).sum().item()
+
+    avg_loss = total_loss / total_tokens
+    return np.exp(avg_loss)
+
+if __name__ == '__main__':
+    tokenizer = build_tokenizer('train.txt', max_voc_size=1000, model_max_length=128)
+    tokenizer.save('tokenizer.pkl')
+    test_texts = ['This is a test.', 'Another test.']
+    tokenizer(test_texts, return_tensors='pt', padding=True,
+          truncation=True)
+
+#     from datasets import load_dataset
+#     from transformers import AutoTokenizer
+#     dataset = load_dataset('text', data_files={'train': "train.txt", 'val': "val.txt"})
+#     dataset = dataset.filter(lambda x: x['text'].strip() != '')
     
+#     tokenizer = build_tokenizer('train.txt', max_voc_size=10000, model_max_length=128)
+#     dataset = dataset.map(
+#     lambda batch: dict(tokenizer(batch['text'], truncation=True, padding=False)),
+#     batched=True,
+#     remove_columns=['text'],
+# )
+
+#     # start training
+#     model_config = A1RNNModelConfig(vocab_size=tokenizer.vocab_size, embedding_size=128, hidden_size=256)
+#     model = A1RNNModel(model_config)
+#     args = TrainingArguments(learning_rate=5e-4, num_train_epochs=3, per_device_train_batch_size=8, per_device_eval_batch_size=8, output_dir='./results')
+#     trainer = A1Trainer(model, args, dataset['train'], dataset['val'], tokenizer)
+#     trainer.train()
