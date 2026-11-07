@@ -305,7 +305,7 @@ class A1RNNModel(PreTrainedModel):
 
         loss_func = torch.nn.CrossEntropyLoss(ignore_index=-100)
 
-        X = labels[:, :-1].clamp(min=0) # all columns in input_ids except the last one
+        X = labels[:, :-1].clamp(min=0)# all columns in input_ids except the last one
         Y = labels[:, 1:] # all columns in input_ids except the first one
 
         assert(X.shape == Y.shape)
@@ -400,8 +400,6 @@ class A1Trainer:
 
         # TODO: Relevant arguments: args.per_device_train_batch_size, args.per_device_eval_batch_size
         pad_id = self.processing_class.pad_token_id
-        if pad_id is None: # e.g. the GPT-2 tokenizer has no pad token
-            pad_id = self.processing_class.eos_token_id
 
         def collate(items):
             seqs = [x['input_ids'] if isinstance(x, dict) else x for x in items]
@@ -492,8 +490,8 @@ if __name__ == '__main__':
         print("Loading tokenizer...")
         tokenizer = A1Tokenizer.from_file('tokenizer.pkl')
     test_texts = ['This is a test.', 'Another test.']
-    tokenizer(test_texts, return_tensors='pt', padding=True,
-          truncation=True)
+    print(tokenizer(test_texts, return_tensors='pt', padding=True,
+          truncation=True))
 
     from datasets import load_dataset
     dataset = load_dataset('text', data_files={'train': "train.txt", 'val': "val.txt"})
@@ -509,27 +507,48 @@ if __name__ == '__main__':
     # start training
     model_config = A1RNNModelConfig(vocab_size=tokenizer.vocab_size, embedding_size=128, hidden_size=256)
     model = A1RNNModel(model_config)
-    args = TrainingArguments(learning_rate=5e-4, num_train_epochs=40, per_device_train_batch_size=512, per_device_eval_batch_size=512, output_dir='./results')
+    args = TrainingArguments(learning_rate=1e-3, num_train_epochs=20, per_device_train_batch_size=256, per_device_eval_batch_size=256, output_dir='./results')
     trainer = A1Trainer(model, args, dataset['train'], dataset['val'], tokenizer)
-    trainer.train()
+    if os.path.exists(args.output_dir):
+        print(f'Loading model from {args.output_dir}.')
+        model = A1RNNModel.from_pretrained(args.output_dir)
+        model.to(trainer.select_device())
+    else:
+        print('Training the model...')
+        trainer.train()
 
     # compute perplexity on the validation set
-    val_perplexity = perplexity(model, dataset['val'], tokenizer, batch_size=512)
+    val_perplexity = perplexity(model, dataset['val'], tokenizer, batch_size=256)
     print(f'Validation Perplexity: {val_perplexity:.4f}')
 
     # next word prediction
     model.eval()
-    prompt = ["Once upon a time in America, there is a fella called",
-                "Once upon a time in the west, there is a cowboy called",
+    prompt = ["Once upon a time in the west, there is a cowboy",
                 "Gothenburg is a city in",
-                "Who are you?",
-                "The capital of China is"]
+                "Machine Learning and",
+                "Natural Language Processing is a ",
+                "The capital of China",
+                "She lives in San"]
 
+    special_ids = [tokenizer.pad_token_id, tokenizer.unk_token_id, tokenizer.bos_token_id, tokenizer.eos_token_id]
     for p in prompt:
+        
         input_ids = tokenizer([p], return_tensors='pt', padding=True, truncation=True)['input_ids'].to(model.device)
         with torch.no_grad():
-            outputs = model(input_ids)
-            next_token_logits = outputs.logits[:, -1, :]
-            next_token_id = torch.argmax(next_token_logits, dim=-1).item()
-            next_token = tokenizer.decode([next_token_id])
+            logits = model(input_ids).logits[0, -1]
+            logits[special_ids] = float('-inf')   # never predict the special tokens
+            probs = torch.softmax(logits, dim=-1)
+            top = probs.topk(5)
+            next_token = tokenizer.decode([top.indices[0].item()])
             print(f'Prompt: "{p}" -> Next token: "{next_token}"')
+            print('    Top 5: ' + ', '.join(f'{tokenizer.int_to_str[i]!r} ({q:.3f})'
+                                           for q, i in zip(top.values.tolist(), top.indices.tolist())))
+
+
+            generated = input_ids[0, :-1].tolist()  
+            for _ in range(15):
+                inp = torch.tensor([generated + [tokenizer.eos_token_id]], device=model.device)
+                step_logits = model(inp).logits[0, -1]
+                step_logits[special_ids] = float('-inf')
+                generated.append(step_logits.argmax().item())
+            print(f'    Continuation: "{tokenizer.decode(generated)}"')
