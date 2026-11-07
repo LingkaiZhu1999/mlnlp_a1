@@ -226,7 +226,7 @@ class A1Tokenizer:
                 ids.append(self.str_to_int.get(token, self.unk_token_id))
 
             if truncation and self.model_max_length is not None:
-                ids = ids[:self.model_max_length]
+                ids = ids[:self.model_max_length-2]  # Reserve space for BOS and EOS tokens
 
             ids_.append([self.bos_token_id] + ids + [self.eos_token_id])
 
@@ -450,7 +450,7 @@ class A1Trainer:
                     val_loss += outputs.loss.item()
 
             avg_val_loss = val_loss / len(val_loader)
-            print(f'Epoch {epoch + 1}/{args.num_train_epochs}, Validation Loss: {avg_val_loss:.4f}')
+            print(f'Epoch {epoch + 1}/{args.num_train_epochs}, Train Loss: {loss:.4f}, Validation Loss: {avg_val_loss:.4f}')
 
         print(f'Saving to {args.output_dir}.')
         self.model.save_pretrained(args.output_dir)
@@ -460,8 +460,6 @@ def perplexity(model, dataset, processing_class, batch_size=8):
     """Compute the perplexity of the model on the given dataset."""
     device = model.device
     pad_id = processing_class.pad_token_id
-    if pad_id is None: # e.g. the GPT-2 tokenizer has no pad token
-        pad_id = processing_class.eos_token_id
 
     def collate(items):
         seqs = [x['input_ids'] if isinstance(x, dict) else x for x in items]
@@ -486,27 +484,52 @@ def perplexity(model, dataset, processing_class, batch_size=8):
     return np.exp(avg_loss)
 
 if __name__ == '__main__':
-    tokenizer = build_tokenizer('train.txt', max_voc_size=1000, model_max_length=128)
-    tokenizer.save('tokenizer.pkl')
+    if not os.path.exists("tokenizer.pkl"):
+        print("Building tokenizer...")
+        tokenizer = build_tokenizer('train.txt', max_voc_size=10000, model_max_length=128)
+        tokenizer.save('tokenizer.pkl')
+    else:
+        print("Loading tokenizer...")
+        tokenizer = A1Tokenizer.from_file('tokenizer.pkl')
     test_texts = ['This is a test.', 'Another test.']
     tokenizer(test_texts, return_tensors='pt', padding=True,
           truncation=True)
 
-#     from datasets import load_dataset
-#     from transformers import AutoTokenizer
-#     dataset = load_dataset('text', data_files={'train': "train.txt", 'val': "val.txt"})
-#     dataset = dataset.filter(lambda x: x['text'].strip() != '')
+    from datasets import load_dataset
+    dataset = load_dataset('text', data_files={'train': "train.txt", 'val': "val.txt"})
+    dataset = dataset.filter(lambda x: x['text'].strip() != '')
     
-#     tokenizer = build_tokenizer('train.txt', max_voc_size=10000, model_max_length=128)
-#     dataset = dataset.map(
-#     lambda batch: dict(tokenizer(batch['text'], truncation=True, padding=False)),
-#     batched=True,
-#     remove_columns=['text'],
-# )
+    dataset = dataset.map(
+    lambda batch: dict(tokenizer(batch['text'], truncation=True, padding=False)),
+    batched=True,
+    remove_columns=['text'],
+    num_proc=8
+    )
 
-#     # start training
-#     model_config = A1RNNModelConfig(vocab_size=tokenizer.vocab_size, embedding_size=128, hidden_size=256)
-#     model = A1RNNModel(model_config)
-#     args = TrainingArguments(learning_rate=5e-4, num_train_epochs=3, per_device_train_batch_size=8, per_device_eval_batch_size=8, output_dir='./results')
-#     trainer = A1Trainer(model, args, dataset['train'], dataset['val'], tokenizer)
-#     trainer.train()
+    # start training
+    model_config = A1RNNModelConfig(vocab_size=tokenizer.vocab_size, embedding_size=128, hidden_size=256)
+    model = A1RNNModel(model_config)
+    args = TrainingArguments(learning_rate=5e-4, num_train_epochs=40, per_device_train_batch_size=512, per_device_eval_batch_size=512, output_dir='./results')
+    trainer = A1Trainer(model, args, dataset['train'], dataset['val'], tokenizer)
+    trainer.train()
+
+    # compute perplexity on the validation set
+    val_perplexity = perplexity(model, dataset['val'], tokenizer, batch_size=512)
+    print(f'Validation Perplexity: {val_perplexity:.4f}')
+
+    # next word prediction
+    model.eval()
+    prompt = ["Once upon a time in America, there is a fella called",
+                "Once upon a time in the west, there is a cowboy called",
+                "Gothenburg is a city in",
+                "Who are you?",
+                "The capital of China is"]
+
+    for p in prompt:
+        input_ids = tokenizer([p], return_tensors='pt', padding=True, truncation=True)['input_ids'].to(model.device)
+        with torch.no_grad():
+            outputs = model(input_ids)
+            next_token_logits = outputs.logits[:, -1, :]
+            next_token_id = torch.argmax(next_token_logits, dim=-1).item()
+            next_token = tokenizer.decode([next_token_id])
+            print(f'Prompt: "{p}" -> Next token: "{next_token}"')
