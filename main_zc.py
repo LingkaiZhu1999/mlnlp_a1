@@ -9,6 +9,9 @@ from torch.utils.data import DataLoader
 import numpy as np
 import sys, time, os
 
+# Mine Libraries
+import tqdm
+
 ###
 ### Part 1. Tokenization.
 ###
@@ -79,15 +82,57 @@ def build_tokenizer(train_file, max_voc_size=None, model_max_length=None,
     f = open(train_file)
     train_texts = [line.split() for line in f].copy() # line by line
 
-    # max_length = max(len(items) for items in train_texts)
-
-    ## Each row will be a list of words in corresponding line, with <EOS> at the end and <PAD> to fill up to max_length
+    ## Each row will be a list of words in corresponding line
     train_words = []
-    for Line_idx in range(0, len(train_texts), 2):
+    for Line_idx in tqdm.trange(0, len(train_texts), 2):
         train_words.append([word for word in train_texts[Line_idx]])
 
-    #  + ['EOS'] + (max_length - len(train_texts[Line_idx])) * ['PAD']
+    ## Each will be a list of bytes in corresponding line
+    train_words_bytes = []
+    for r in tqdm.trange(len(train_words)):
+        train_words_bytes.append([tokens for word in train_words[r] for tokens in split_into_bytes(word)])
+
+
+    flatten_train_words_bytes = [item for sublist in train_words_bytes for item in sublist]
+    
+    # counts_train_bytes = dict(sorted(Counter(flatten_train_words_bytes).items(), key=lambda x: x[1], reverse=True))
+    # vocabulary = {Ntoken: i for i, Ntoken in enumerate(counts_train_bytes.keys())}
+
     #-- 2. Start the vocabulary with the four special tokens and all 256 possible byte values. The vocabulary maps each token to an integer ID.
+    special_tokens = [unk_token, eos_token, bos_token, pad_token]
+    byte_tokens = [bytes([i]) for i in range(256)]
+    vocabulary = {token: i for i, token in enumerate(special_tokens + byte_tokens)}
+
+    flatten_train_words_bytes_pairs = list(zip(flatten_train_words_bytes[:-1], flatten_train_words_bytes[1:]))
+
+    #-- 3. Count how often each pair of neighboring tokens occurs.
+
+    flatten_pairs_sort = sorted(Counter(flatten_train_words_bytes_pairs).items(), key=lambda x: x[1], reverse=True)
+
+    vocabulary.update({flatten_pairs_sort[0][0]: len(vocabulary)})
+
+    value = 0
+    flatten_train_words_bytes_pairs2 = list(map(lambda x: (value + flatten_pairs_sort[0][0][i] for i in range(len(flatten_pairs_sort[0][0]))) if x == flatten_pairs_sort[0] else x, flatten_train_words_bytes_pairs))
+
+    import pdb; pdb.set_trace()
+
+    #-- 4. Join the most common pair everywhere it occurs. Add the joined token to the vocabulary and save the pair as a merge rule.
+
+
+
+
+
+
+
+
+
+
+    # max_length = max(len(items) for items in train_words_bytes)
+    # print('max_length:', max_length, "Second Line of train_texts:", train_words_bytes[1])
+
+
+    #  + ['EOS'] + (max_length - len(train_texts[Line_idx])) * ['PAD']
+
     return train_words
 
 
@@ -288,9 +333,5 @@ class A1Trainer:
 
     
 if __name__ == '__main__':
-    train_tokens = build_tokenizer('train.txt', max_voc_size=1000, model_max_length=32)
-    train_words_bytes = []
-    for r in range(len(train_tokens)):
-        import pdb; pdb.set_trace()
-        train_words_bytes.append([tokens for word in train_tokens[r] for tokens in split_into_bytes(word)])
+    build_tokenizer('train.txt', max_voc_size=1000, model_max_length=32)
     print('done')
