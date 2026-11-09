@@ -93,6 +93,7 @@ def build_tokenizer(train_file, max_voc_size=None, model_max_length=None,
         train_words_bytes.append([tokens for word in train_words[r] for tokens in split_into_bytes(word)])
 
 
+
     flatten_train_words_bytes = [item for sublist in train_words_bytes for item in sublist]
     
     # counts_train_bytes = dict(sorted(Counter(flatten_train_words_bytes).items(), key=lambda x: x[1], reverse=True))
@@ -103,26 +104,34 @@ def build_tokenizer(train_file, max_voc_size=None, model_max_length=None,
     byte_tokens = [bytes([i]) for i in range(256)]
     vocabulary = {token: i for i, token in enumerate(special_tokens + byte_tokens)}
 
-    flatten_train_words_bytes_pairs = list(zip(flatten_train_words_bytes[:-1], flatten_train_words_bytes[1:]))
-
     #-- 3. Count how often each pair of neighboring tokens occurs.
 
-    flatten_pairs_sort = sorted(Counter(flatten_train_words_bytes_pairs).items(), key=lambda x: x[1], reverse=True)
+    def merge_pairs(tokens, best_pair):
+        i=0
+        merged_tokens = []
+        merged_token = b''.join(best_pair)
+        while i < len(tokens):
+            if i < len(tokens) - 1 and tokens[i] == best_pair[0] and tokens[i + 1] == best_pair[1]:
+                merged_tokens.append(merged_token)
+                i += 2  
+            else:
+                merged_tokens.append(tokens[i])
+                i += 1
+        return merged_tokens
 
-    vocabulary.update({flatten_pairs_sort[0][0]: len(vocabulary)})
+    for s in tqdm.trange(max_voc_size - 260):
+        # flatten_train_words_bytes_pairs = list(zip(flatten_train_words_bytes[:-1], flatten_train_words_bytes[1:]))
 
-    value = 0
-    flatten_train_words_bytes_pairs2 = list(map(lambda x: (value + flatten_pairs_sort[0][0][i] for i in range(len(flatten_pairs_sort[0][0]))) if x == flatten_pairs_sort[0] else x, flatten_train_words_bytes_pairs))
+        best_pair, count = Counter(zip(flatten_train_words_bytes[:-1], flatten_train_words_bytes[1:])).most_common(1)[0]
 
-    import pdb; pdb.set_trace()
+        flatten_train_words_bytes = merge_pairs(flatten_train_words_bytes, best_pair)
+
+        vocabulary.update({(b''.join(best_pair)): len(vocabulary)})
+
+        # print(f'Current vocabulary size: {len(vocabulary)}, most common pair: {best_pair}, count: {count}')
+
 
     #-- 4. Join the most common pair everywhere it occurs. Add the joined token to the vocabulary and save the pair as a merge rule.
-
-
-
-
-
-
 
 
 
@@ -333,5 +342,5 @@ class A1Trainer:
 
     
 if __name__ == '__main__':
-    build_tokenizer('train.txt', max_voc_size=1000, model_max_length=32)
+    build_tokenizer('train.txt', max_voc_size=400, model_max_length=32)
     print('done')
