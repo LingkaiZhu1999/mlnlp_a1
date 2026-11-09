@@ -1,8 +1,9 @@
 
-import torch, nltk, pickle
+import torch, pickle
 from torch import nn
 from collections import Counter
 from transformers import BatchEncoding, PretrainedConfig, PreTrainedModel
+from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from torch.utils.data import DataLoader
 import numpy as np
@@ -11,16 +12,56 @@ import sys, time, os
 ###
 ### Part 1. Tokenization.
 ###
-def lowercase_tokenizer(text):
-    return [t.lower() for t in nltk.word_tokenize(text)]
 
-def build_tokenizer(train_file, tokenize_fun=lowercase_tokenizer, max_voc_size=None, model_max_length=None,
+# Byte-pair encoding (BPE): the main idea
+# ---------------------------------------
+# A token is one piece of text (not necessarily a word/subword/"token").
+# In this tokenizer, every token is stored as one
+# or more bytes. A pair means two tokens that appear next to each other, and a
+# merge means joining such a pair to make one longer token.
+#
+# Training BPE:
+#   1. Split every line of the training text into individual UTF-8 bytes.
+#   2. Start the vocabulary with the four special tokens and all 256 possible
+#      byte values. The vocabulary maps each token to an integer ID.
+#   3. Count how often each pair of neighboring tokens occurs.
+#   4. Join the most common pair everywhere it occurs. Add the joined token to
+#      the vocabulary and save the pair as a merge rule.
+#   5. Repeat steps 3 and 4 until the requested vocabulary size is reached 
+#      (NB: make sure it is provided).
+
+#
+# Encoding new text:
+#   1. Remove whitespace from the beginning and end.
+#   2. Split the text into individual UTF-8 bytes.
+#   3. Apply the saved merge rules in the same order in which they were learned.
+#   4. Replace the resulting tokens with their vocabulary IDs.
+#   5. Add BOS/EOS IDs, and optionally truncate or pad the sequence.
+#
+# This simple version treats a whole non-empty line as one sequence. Therefore,
+# it may learn tokens that contain spaces or parts of more than one word.
+
+def split_into_bytes(text):
+    """Split a string into individual UTF-8 byte tokens.
+
+    Args:
+        text: The input string to encode.
+
+    Returns:
+        A list containing one ``bytes`` object for each byte in the text.
+    """
+    print(f'Encoding text: {text}')
+    text_bytes = [t.encode('utf-8') for t in text]
+    return text_bytes
+    
+    
+
+def build_tokenizer(train_file, max_voc_size=None, model_max_length=None,
                     pad_token='<PAD>', unk_token='<UNK>', bos_token='<BOS>', eos_token='<EOS>'):
     """ Build a tokenizer from the given file.
 
         Args:
              train_file:        The name of the file containing the training texts.
-             tokenize_fun:      The function that maps a text to a list of string tokens.
              max_voc_size:      The maximally allowed size of the vocabulary.
              model_max_length:  Truncate texts longer than this length.
              pad_token:         The dummy string corresponding to padding.
@@ -29,7 +70,7 @@ def build_tokenizer(train_file, tokenize_fun=lowercase_tokenizer, max_voc_size=N
              eos_token:         The dummy string corresponding to the end the text.
     """
 
-    # TODO: build the vocabulary, possibly truncating it to max_voc_size if that is specified.
+    # TODO: build the vocabulary, using a byte-level BPE tokenization (explained above)
     # Then return a tokenizer object (implemented below).
     ...
 
@@ -60,9 +101,6 @@ class A1Tokenizer:
         # 
         # - If `truncation` is set to True, the length of the encoded sequences should be 
         #   at most self.model_max_length.
-        # - Encoded sequences should start with the beginning-of-sequence dummy; non-truncated
-        #   sequences should end with the end-of-sequence dummy; out-of-vocabulary tokens should
-        #   be encoded with the 'unknown' dummy.
         # - If `padding` is set to True, then all the integer-encoded sequences should be of the
         #   same length. That is: the shorter sequences should be "padded" by adding dummy padding
         #   tokens on the right side.
@@ -78,6 +116,10 @@ class A1Tokenizer:
     def __len__(self):
         """Return the size of the vocabulary."""
         return ...
+
+    def decode(self, ids):
+        """Return a string decoded from given input ids"""
+        return ... 
     
     def save(self, filename):
         """Save the tokenizer to the given file."""
@@ -112,19 +154,30 @@ class A1RNNModel(PreTrainedModel):
         self.embedding = ...
         self.rnn = ...
         self.unembedding = ...
+        self.post_init() # for compatibility 
         
-    def forward(self, X):
+    def forward(self, labels):
         """The forward pass of the RNN-based language model.
         
            Args:
              X:  The input tensor (2D), consisting of a batch of integer-encoded texts.
            Returns:
-             The output tensor (3D), consisting of logits for all token positions for all vocabulary items.
+             CausalLMOutputWithPast object that stores loss and logits (the output tensor (3D) for all token positions for all vocabulary items.)
         """
+
+        loss_func = torch.nn.CrossEntropyLoss(ignore_index=-100)
+
+        X = ... # all columns in input_ids except the last one
+        Y = ... # all columns in input_ids except the first one
+
+        assert(X.shape == Y.shape)
+
         embedded = ...
         rnn_out, _ = ...
         out = ...
-        return out
+
+        #  compute the loss for the model output and Y 
+        return CausalLMOutputWithPast(...)
 
 
 ###
@@ -150,7 +203,7 @@ class A1RNNModel(PreTrainedModel):
 class A1Trainer:
     """A minimal implementation similar to a Trainer from the HuggingFace library."""
 
-    def __init__(self, model, args, train_dataset, eval_dataset, tokenizer):
+    def __init__(self, model, args, train_dataset, eval_dataset, processing_class):
         """Set up the trainer.
            
            Args:
@@ -159,13 +212,13 @@ class A1Trainer:
              train_dataset:  The dataset containing the training documents.
              eval_dataset:   The dataset containing the validation documents.
              eval_dataset:   The dataset containing the validation documents.
-             tokenizer:      The tokenizer.
+             processing_class:      The tokenizer.
         """
         self.model = model
         self.args = args
         self.train_dataset = train_dataset
         self.eval_dataset = eval_dataset
-        self.tokenizer = tokenizer
+        self.processing_class = processing_class
 
         assert(args.optim == 'adamw_torch')
         assert(args.eval_strategy == 'epoch')
@@ -174,7 +227,7 @@ class A1Trainer:
         """Return the device to use for training, depending on the training arguments and the available backends."""
         if self.args.use_cpu:
             return torch.device('cpu')
-        if not self.args.no_cuda and torch.cuda.is_available():
+        if torch.cuda.is_available():
             return torch.device('cuda')
         if torch.mps.is_available():
             return torch.device('mps')
@@ -188,8 +241,7 @@ class A1Trainer:
         print('Device:', device)
         self.model.to(device)
         
-        loss_func = torch.nn.CrossEntropyLoss(ignore_index=self.tokenizer.pad_token_id)
-
+        
         # TODO: Relevant arguments: at least args.learning_rate, but you can optionally also consider
         # other Adam-related hyperparameters here.
         optimizer = torch.optim.AdamW(...)
@@ -204,19 +256,22 @@ class A1Trainer:
         #   for each batch B in the training set:
         #
         #       PREPROCESSING AND FORWARD PASS:
-        #       input_ids = apply your tokenizer to B
-	    #       X = all columns in input_ids except the last one
-	    #       Y = all columns in input_ids except the first one
-	    #       put X and Y onto the GPU (or whatever device you use)
-        #       apply the model to X
-        #   	compute the loss for the model output and Y
+        #       labels = apply your tokenizer to B
+        #       replace padding tokens with value -100 so loss function will ignore them
+	    #       put labels onto the GPU (or whatever device you use)
+        #       apply the model to labels
         #
         #       BACKWARD PASS AND MODEL UPDATE:
         #       optimizer.zero_grad()
-        #       loss.backward()
+        #       loss.backward() # loss is stored as an attribute of model's output
         #       optimizer.step()
 
         print(f'Saving to {args.output_dir}.')
         self.model.save_pretrained(args.output_dir)
 
     
+if __name__ == '__main__':
+    f = open('train.txt')
+    for line in f:
+        for word in line.split():
+            split_into_bytes(word)
