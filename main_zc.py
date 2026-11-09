@@ -72,7 +72,15 @@ def build_tokenizer(train_file, max_voc_size=None, model_max_length=None,
 
     # TODO: build the vocabulary, using a byte-level BPE tokenization (explained above)
     # Then return a tokenizer object (implemented below).
-    ...
+    # add <BOS> at the beginning of each paragraph; <EOS> at the end of each paragraph; <PAD> for padding to make input tensors rectangular
+
+    # 1. Split every line of the training text into individual UTF-8 bytes.
+    f = open(train_file)
+    for line in f:
+        import pdb; pdb.set_trace()
+        train_texts = f.readlines()
+
+    # 2. Start the vocabulary with the four special tokens and all 256 possible byte values. The vocabulary maps each token to an integer ID.
 
 class A1Tokenizer:
     """A minimal implementation of a tokenizer similar to tokenizers in the HuggingFace library."""
