@@ -105,6 +105,7 @@ def build_tokenizer(train_file, max_voc_size=None, model_max_length=None,
     vocabulary = {token: i for i, token in enumerate(special_tokens + byte_tokens)}
 
     #-- 3. Count how often each pair of neighboring tokens occurs.
+    #-- 4. Join the most common pair everywhere it occurs. Add the joined token to the vocabulary and save the pair as a merge rule.
 
     def merge_pairs(tokens, best_pair):
         i=0
@@ -129,12 +130,6 @@ def build_tokenizer(train_file, max_voc_size=None, model_max_length=None,
         vocabulary.update({(b''.join(best_pair)): len(vocabulary)})
 
         # print(f'Current vocabulary size: {len(vocabulary)}, most common pair: {best_pair}, count: {count}')
-
-
-    #-- 4. Join the most common pair everywhere it occurs. Add the joined token to the vocabulary and save the pair as a merge rule.
-
-
-
 
     # max_length = max(len(items) for items in train_words_bytes)
     # print('max_length:', max_length, "Second Line of train_texts:", train_words_bytes[1])
