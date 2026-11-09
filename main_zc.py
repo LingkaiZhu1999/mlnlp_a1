@@ -50,9 +50,10 @@ def split_into_bytes(text):
     Returns:
         A list containing one ``bytes`` object for each byte in the text.
     """
-    print(f'Encoding text: {text}')
-    text_bytes = [t.encode('utf-8') for t in text]
-    return text_bytes
+    # text_bytes = [t.encode('utf-8') for t in text]
+    encoded_text = text.encode("utf-8")
+    bytes_list = [bytes([b]) for b in encoded_text]
+    return bytes_list
     
     
 
@@ -74,13 +75,21 @@ def build_tokenizer(train_file, max_voc_size=None, model_max_length=None,
     # Then return a tokenizer object (implemented below).
     # add <BOS> at the beginning of each paragraph; <EOS> at the end of each paragraph; <PAD> for padding to make input tensors rectangular
 
-    # 1. Split every line of the training text into individual UTF-8 bytes.
+    #-- 1. Split every line of the training text into individual UTF-8 bytes.
     f = open(train_file)
-    for line in f:
-        import pdb; pdb.set_trace()
-        train_texts = f.readlines()
+    train_texts = [line.split() for line in f].copy() # line by line
 
-    # 2. Start the vocabulary with the four special tokens and all 256 possible byte values. The vocabulary maps each token to an integer ID.
+    # max_length = max(len(items) for items in train_texts)
+
+    ## Each row will be a list of words in corresponding line, with <EOS> at the end and <PAD> to fill up to max_length
+    train_words = []
+    for Line_idx in range(0, len(train_texts), 2):
+        train_words.append([word for word in train_texts[Line_idx]])
+
+    #  + ['EOS'] + (max_length - len(train_texts[Line_idx])) * ['PAD']
+    #-- 2. Start the vocabulary with the four special tokens and all 256 possible byte values. The vocabulary maps each token to an integer ID.
+    return train_words
+
 
 class A1Tokenizer:
     """A minimal implementation of a tokenizer similar to tokenizers in the HuggingFace library."""
@@ -279,7 +288,9 @@ class A1Trainer:
 
     
 if __name__ == '__main__':
-    f = open('train.txt')
-    for line in f:
-        for word in line.split():
-            split_into_bytes(word)
+    train_tokens = build_tokenizer('train.txt', max_voc_size=1000, model_max_length=32)
+    train_words_bytes = []
+    for r in range(len(train_tokens)):
+        import pdb; pdb.set_trace()
+        train_words_bytes.append([tokens for word in train_tokens[r] for tokens in split_into_bytes(word)])
+    print('done')
