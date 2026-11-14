@@ -1,0 +1,10 @@
+{
+  "architectures": [
+    "A1RNNModel"
+  ],
+  "dtype": "float32",
+  "embedding_size": 32,
+  "hidden_size": 64,
+  "transformers_version": "5.20.2",
+  "vocab_size": 500
+}
